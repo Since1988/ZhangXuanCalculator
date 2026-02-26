@@ -7,47 +7,65 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest # 换Win2019，Chocolatey包更全
+    runs-on: windows-latest # 换最新版，资源更多
     timeout-minutes: 45
 
     steps:
     - uses: actions/checkout@v4
 
-    # 核心修复：用Chocolatey安装Qt 5.15（稳定，不会404）
-    - name: 用 Chocolatey 安装 Qt 5.15.2
+    # 步骤1：用Chocolatey安装Qt 5.15（强制指定安装路径）
+    - name: 安装 Qt 5.15.2（手动指定路径）
       run: |
-        # 刷新Chocolatey源
-        choco source add -n=chocolatey -s="https://community.chocolatey.org/api/v2/"
-        # 安装Qt 5.15.2（MSVC2019 64位）
-        choco install qt5-default -y --version=5.15.2
-        # 配置环境变量
-        echo "QTDIR=C:\Qt\5.15.2\msvc2019_64" >> $env:GITHUB_ENV
-        echo "PATH=C:\Qt\5.15.2\msvc2019_64\bin;C:\Qt\Tools\QtCreator\bin;$env:PATH" >> $env:GITHUB_ENV
+        # 安装Qt，强制安装到C:\Qt
+        choco install qt5 --version=5.15.2 --params="/InstallationFolder:C:\Qt" -y --force
+        # 查找qmake的实际路径（遍历所有可能的位置）
+        $qmakePath = Get-ChildItem -Path "C:\Qt" -Name "qmake.exe" -Recurse -ErrorAction SilentlyContinue
+        if ($qmakePath) {
+          $qmakeFullPath = (Get-Item "C:\Qt\$qmakePath").DirectoryName
+          echo "找到qmake路径: $qmakeFullPath"
+          echo "QMAKE_PATH=$qmakeFullPath" >> $env:GITHUB_ENV
+          echo "PATH=$qmakeFullPath;$env:PATH" >> $env:GITHUB_ENV
+        } else {
+          # 备用方案：直接下载qmake工具包
+          Invoke-WebRequest -Uri "https://github.com/miurahr/aqtinstall/releases/download/3.10.0/aqtinstall-3.10.0-py3-none-any.whl" -OutFile "aqtinstall.whl"
+          pip install aqtinstall.whl
+          aqt install-qt windows desktop 5.15.2 win64_msvc2019_64 --outputdir C:\Qt
+          $qmakeFullPath = "C:\Qt\5.15.2\msvc2019_64\bin"
+          echo "QMAKE_PATH=$qmakeFullPath" >> $env:GITHUB_ENV
+          echo "PATH=$qmakeFullPath;$env:PATH" >> $env:GITHUB_ENV
+        }
 
-    # 用Chocolatey安装OpenCV 3.4（稳定兼容）
-    - name: 用 Chocolatey 安装 OpenCV 3.4.16
+    # 步骤2：安装OpenCV 3.4（稳定版）
+    - name: 安装 OpenCV 3.4.16
       run: |
-        choco install opencv -y --version=3.4.16
-        echo "OPENCV_DIR=C:\tools\opencv\build" >> $env:GITHUB_ENV
-        echo "PATH=C:\tools\opencv\build\x64\vc15\bin;$env:PATH" >> $env:GITHUB_ENV
+        choco install opencv --version=3.4.16 -y --force
+        $opencvPath = Get-ChildItem -Path "C:\tools" -Name "opencv_world3416.dll" -Recurse -ErrorAction SilentlyContinue
+        if ($opencvPath) {
+          $opencvBinPath = (Get-Item "C:\tools\$opencvPath").DirectoryName
+          $opencvBuildPath = Split-Path $opencvBinPath -Parent | Split-Path -Parent
+          echo "OPENCV_DIR=$opencvBuildPath" >> $env:GITHUB_ENV
+          echo "PATH=$opencvBinPath;$env:PATH" >> $env:GITHUB_ENV
+        }
 
-    # 配置VS2019编译环境
-    - name: 配置 MSVC 2019 x64
+    # 步骤3：配置VS编译环境
+    - name: 配置 MSVC x64 环境
       uses: ilammy/msvc-dev-cmd@v1
       with:
         arch: x64
-        toolset: 14.29
 
-    # 验证环境
-    - name: 检查工具链
+    # 步骤4：强制验证qmake（关键！）
+    - name: 验证qmake是否可用
       run: |
-        echo "Qt路径: $env:QTDIR"
-        echo "OpenCV路径: $env:OPENCV_DIR"
-        qmake --version
+        # 打印所有路径，排查问题
+        echo "当前PATH: $env:PATH"
+        echo "qmake路径: $env:QMAKE_PATH"
+        # 手动调用qmake
+        & "$env:QMAKE_PATH\qmake.exe" --version
+        # 确认cl编译器
         cl
 
-    # 创建Qt5兼容的项目文件
-    - name: 创建 Qt5 项目文件
+    # 步骤5：创建项目文件
+    - name: 创建Qt项目文件
       run: |
         (
         echo QT += core gui widgets
@@ -62,33 +80,37 @@ jobs:
         ) > ZhangXuanCalculator.pro
         type ZhangXuanCalculator.pro
 
-    # 编译
+    # 步骤6：编译（手动指定qmake路径）
     - name: 编译项目
       run: |
-        qmake ZhangXuanCalculator.pro
+        & "$env:QMAKE_PATH\qmake.exe" ZhangXuanCalculator.pro
         nmake
 
-    # 打包（包含所有依赖）
+    # 步骤7：打包成品
     - name: 打包成品
       run: |
         mkdir -Force ./final
         copy ./release/ZhangXuanCalculator.exe ./final/
         
-        # 复制Qt依赖
-        windeployqt ./final/ZhangXuanCalculator.exe --release --no-translations --no-opengl-sw
+        # 复制Qt依赖（手动指定windeployqt路径）
+        $windeployqtPath = Join-Path $env:QMAKE_PATH "windeployqt.exe"
+        & $windeployqtPath ./final/ZhangXuanCalculator.exe --release --no-translations
         
         # 复制OpenCV依赖
-        copy "C:\tools\opencv\build\x64\vc15\bin\opencv_world3416.dll" ./final/
+        copy "$env:OPENCV_DIR\x64\vc15\bin\opencv_world3416.dll" ./final/
         
         # 复制VC运行库
-        $vcPath = "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Redist\MSVC\14.29.30133\x64\Microsoft.VC142.CRT"
-        copy "$vcPath\*.dll" ./final/
+        $vcPath = Get-ChildItem -Path "C:\Program Files" -Name "msvcp140.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($vcPath) {
+          $vcDir = (Get-Item "C:\Program Files\$vcPath").DirectoryName
+          copy "$vcDir\*.dll" ./final/
+        }
         
         # 压缩
         Compress-Archive -Path ./final/* -DestinationPath ZhangXuanCalculator_Final.zip -Force
 
-    # 上传成品
-    - name: 上传编译好的成品
+    # 步骤8：上传成品
+    - name: 上传成品
       uses: actions/upload-artifact@v4
       with:
         name: ZhangXuanCalculator_Win64

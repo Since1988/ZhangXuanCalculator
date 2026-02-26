@@ -1,0 +1,63 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: 安装 Qt
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: '6.5.3'
+        host: 'windows'
+        target: 'desktop'
+        arch: 'win64_msvc2019_64'
+        modules: 'qtcore qtgui qtwidgets'
+
+    - name: 安装 OpenCV
+      run: |
+        Invoke-WebRequest -Uri "https://github.com/opencv/opencv/releases/download/4.8.0/opencv-4.8.0-windows.exe" -OutFile "opencv.exe"
+        Start-Process -FilePath ".\opencv.exe" -ArgumentList "-o$env:GITHUB_WORKSPACE -y" -Wait
+        echo "OPENCV_DIR=$env:GITHUB_WORKSPACE\opencv\build" >> $env:GITHUB_ENV
+
+    - name: 配置 MSVC 环境
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: 创建项目文件
+      run: |
+        echo "QT += core gui widgets" > ZhangXuanCalculator.pro
+        echo "CONFIG += c++17" >> ZhangXuanCalculator.pro
+        echo "SOURCES += Card.cpp ZhangXuanCalculator.cpp WindowCapture.cpp CaptureThread.cpp MainWindow.cpp main.cpp" >> ZhangXuanCalculator.pro
+        echo "HEADERS += Card.h ZhangXuanCalculator.h WindowCapture.h CaptureThread.h MainWindow.h" >> ZhangXuanCalculator.pro
+        echo "FORMS += MainWindow.ui" >> ZhangXuanCalculator.pro
+        echo "INCLUDEPATH += $env:OPENCV_DIR/include $env:OPENCV_DIR/include/opencv2" >> ZhangXuanCalculator.pro
+        echo "LIBS += -L$env:OPENCV_DIR/x64/vc16/lib -lopencv_world480" >> ZhangXuanCalculator.pro
+        echo "LIBS += -luser32 -lgdi32" >> ZhangXuanCalculator.pro
+
+    - name: 编译项目
+      run: |
+        qmake ZhangXuanCalculator.pro
+        nmake
+
+    - name: 打包成品
+      run: |
+        mkdir release
+        copy release\ZhangXuanCalculator.exe release\
+        windeployqt release\ZhangXuanCalculator.exe
+        copy $env:OPENCV_DIR\x64\vc16\bin\opencv_world480.dll release\
+        Compress-Archive -Path release\* -DestinationPath ZhangXuanCalculator_Win64.zip
+
+    - name: 上传成品
+      uses: actions/upload-artifact@v4
+      with:
+        name: ZhangXuanCalculator_Win64
+        path: ZhangXuanCalculator_Win64.zip

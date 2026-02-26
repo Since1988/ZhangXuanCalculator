@@ -7,105 +7,111 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022 # 固定用Win2022，避免环境波动
 
     steps:
     - uses: actions/checkout@v4
 
-    # 修复1：换国内源加速Qt下载
-    - name: 配置Qt国内源
+    # 修复核心：手动下载安装Qt，完全绕开Python依赖
+    - name: 手动安装 Qt 6.5.3 (无Python依赖)
       run: |
-        echo "QT_DOWNLOAD_SOURCE=mirror:https://mirrors.tuna.tsinghua.edu.cn/qt" >> $env:GITHUB_ENV
+        # 下载Qt预编译包（清华源，速度快）
+        Invoke-WebRequest -Uri "https://mirrors.tuna.tsinghua.edu.cn/qt/archive/qt/6.5/6.5.3/qt-opensource-windows-x86-6.5.3.exe" -OutFile "qt-installer.exe"
+        
+        # 静默安装Qt（仅安装核心模块）
+        .\qt-installer.exe --verbose --no-force-installations --accept-licenses --accept-obligations --no-login --installationFolder C:\Qt\6.5.3\msvc2022_64 --add Qt.6.5.3.msvc2022_64 --add Qt.6.5.3.msvc2022_64.component.core --add Qt.6.5.3.msvc2022_64.component.gui --add Qt.6.5.3.msvc2022_64.component.widgets --silent
+        
+        # 配置Qt环境变量
+        echo "QTDIR=C:\Qt\6.5.3\msvc2022_64" >> $env:GITHUB_ENV
+        echo "PATH=$env:QTDIR\bin;$env:PATH" >> $env:GITHUB_ENV
 
-    - name: 安装 Qt 6.5.3
-      uses: jurplel/install-qt-action@v3
-      with:
-        version: '6.5.3'
-        host: 'windows'
-        target: 'desktop'
-        arch: 'win64_msvc2022_64' # 适配最新VS
-        modules: 'qtcore qtgui qtwidgets'
-        cache: true
-
-    # 修复2：改用预编译的OpenCV，避免解压出错
+    # 安装OpenCV（稳定版本）
     - name: 安装 OpenCV 4.8.0
       run: |
-        # 直接下载解压好的OpenCV，跳过安装包
-        Invoke-WebRequest -Uri "https://github.com/huihut/OpenCV-MinGW-Build/releases/download/4.8.0/opencv-4.8.0-vc17_vc16.zip" -OutFile "opencv.zip"
-        Expand-Archive -Path opencv.zip -DestinationPath . -Force
-        echo "OPENCV_DIR=$env:GITHUB_WORKSPACE\opencv" >> $env:GITHUB_ENV
+        # 下载解压好的OpenCV包（避免安装包解压出错）
+        Invoke-WebRequest -Uri "https://github.com/opencv/opencv/releases/download/4.8.0/opencv-4.8.0-windows.exe" -OutFile "opencv.exe"
+        # 静默解压
+        .\opencv.exe -o"C:\opencv" -y
+        echo "OPENCV_DIR=C:\opencv\build" >> $env:GITHUB_ENV
+        echo "PATH=$env:OPENCV_DIR\x64\vc16\bin;$env:PATH" >> $env:GITHUB_ENV
 
-    # 修复3：指定VS2022环境
-    - name: 配置 MSVC 2022 环境
+    # 配置VS2022编译环境
+    - name: 配置 MSVC 2022 x64 环境
       uses: ilammy/msvc-dev-cmd@v1
       with:
-        toolset: 14.3
         arch: x64
+        toolset: 14.38
 
-    # 修复4：手动创建完整项目文件，避免路径问题
-    - name: 创建完整的.pro文件
+    # 验证环境（排查问题用）
+    - name: 检查环境变量和工具
       run: |
-        @echo off
-        echo QT += core gui widgets > ZhangXuanCalculator.pro
-        echo CONFIG += c++17 release >> ZhangXuanCalculator.pro
-        echo DESTDIR = ./release >> ZhangXuanCalculator.pro
-        echo OBJECTS_DIR = ./obj >> ZhangXuanCalculator.pro
-        echo MOC_DIR = ./moc >> ZhangXuanCalculator.pro
-        echo RCC_DIR = ./rcc >> ZhangXuanCalculator.pro
-        echo SOURCES += ^
-        echo     Card.cpp ^
-        echo     ZhangXuanCalculator.cpp ^
-        echo     WindowCapture.cpp ^
-        echo     CaptureThread.cpp ^
-        echo     MainWindow.cpp ^
-        echo     main.cpp >> ZhangXuanCalculator.pro
-        echo HEADERS += ^
-        echo     Card.h ^
-        echo     ZhangXuanCalculator.h ^
-        echo     WindowCapture.h ^
-        echo     CaptureThread.h ^
-        echo     MainWindow.h >> ZhangXuanCalculator.pro
-        echo FORMS += MainWindow.ui >> ZhangXuanCalculator.pro
-        echo # OpenCV配置 >> ZhangXuanCalculator.pro
-        echo INCLUDEPATH += $$(OPENCV_DIR)/include $$(OPENCV_DIR)/include/opencv2 >> ZhangXuanCalculator.pro
-        echo LIBS += -L$$(OPENCV_DIR)/x64/vc16/lib -lopencv_world480 >> ZhangXuanCalculator.pro
-        echo # Windows API依赖 >> ZhangXuanCalculator.pro
-        echo LIBS += -luser32 -lgdi32 -lwinmm >> ZhangXuanCalculator.pro
-        # 打印确认文件内容
+        echo "Qt路径: $env:QTDIR"
+        echo "OpenCV路径: $env:OPENCV_DIR"
+        echo "PATH: $env:PATH"
+        qmake --version
+        cl
+        nmake
+
+    # 创建项目文件（确保格式正确）
+    - name: 创建Qt项目文件
+      run: |
+        # 用批处理创建.pro文件，避免PowerShell格式问题
+        (
+        echo QT += core gui widgets
+        echo CONFIG += c++17 release
+        echo DESTDIR = ./release
+        echo OBJECTS_DIR = ./obj
+        echo MOC_DIR = ./moc
+        echo RCC_DIR = ./rcc
+        echo SOURCES += Card.cpp ZhangXuanCalculator.cpp WindowCapture.cpp CaptureThread.cpp MainWindow.cpp main.cpp
+        echo HEADERS += Card.h ZhangXuanCalculator.h WindowCapture.h CaptureThread.h MainWindow.h
+        echo FORMS += MainWindow.ui
+        echo INCLUDEPATH += $$(OPENCV_DIR)/include $$(OPENCV_DIR)/include/opencv2
+        echo LIBS += -L$$(OPENCV_DIR)/x64/vc16/lib -lopencv_world480
+        echo LIBS += -luser32 -lgdi32 -lwinmm
+        ) > ZhangXuanCalculator.pro
+
+        # 打印文件内容确认
         type ZhangXuanCalculator.pro
 
-    # 修复5：分步编译，先qmake再nmake
-    - name: 生成编译文件
+    # 编译项目
+    - name: 生成并编译
       run: |
+        # 生成Makefile
         qmake ZhangXuanCalculator.pro -spec win32-msvc "CONFIG+=release"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-    - name: 编译项目
-      run: |
-        nmake clean
+        
+        # 编译
         nmake
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    # 修复6：完善打包逻辑，确保所有依赖都复制
-    - name: 打包成品（包含所有依赖）
+    # 打包（包含所有依赖，直接运行）
+    - name: 打包成品（含Qt/OpenCV/VC运行库）
       run: |
-        # 创建输出目录
         mkdir -Force ./final_release
+        
         # 复制主程序
         copy ./release/ZhangXuanCalculator.exe ./final_release/
+        
         # 复制Qt依赖
-        windeployqt --release --no-translations --no-opengl-sw ./final_release/ZhangXuanCalculator.exe
+        windeployqt --release --no-compiler-runtime --no-translations ./final_release/ZhangXuanCalculator.exe
+        
         # 复制OpenCV依赖
         copy "$env:OPENCV_DIR\x64\vc16\bin\opencv_world480.dll" ./final_release/
-        # 复制VC运行库（避免缺少MSVCP140.dll）
-        copy "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC\14.38.33130\x64\Microsoft.VC143.CRT\*.dll" ./final_release/
+        
+        # 复制VC运行库（解决缺少MSVCP140.dll）
+        $vcPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC\14.38.33130\x64\Microsoft.VC143.CRT"
+        copy "$vcPath\msvcp140.dll" ./final_release/
+        copy "$vcPath\vcruntime140.dll" ./final_release/
+        copy "$vcPath\vcruntime140_1.dll" ./final_release/
+        
         # 压缩打包
-        Compress-Archive -Path ./final_release/* -DestinationPath ZhangXuanCalculator_Win64_Release.zip -Force
+        Compress-Archive -Path ./final_release/* -DestinationPath ZhangXuanCalculator_Win64_Final.zip -Force
 
     # 上传成品
     - name: 上传编译好的成品
       uses: actions/upload-artifact@v4
       with:
         name: ZhangXuanCalculator_Win64
-        path: ZhangXuanCalculator_Win64_Release.zip
-        retention-days: 90 # 保留90天
+        path: ZhangXuanCalculator_Win64_Final.zip
+        retention-days: 90

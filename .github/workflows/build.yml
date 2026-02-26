@@ -12,52 +12,100 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: 安装 Qt
+    # 修复1：换国内源加速Qt下载
+    - name: 配置Qt国内源
+      run: |
+        echo "QT_DOWNLOAD_SOURCE=mirror:https://mirrors.tuna.tsinghua.edu.cn/qt" >> $env:GITHUB_ENV
+
+    - name: 安装 Qt 6.5.3
       uses: jurplel/install-qt-action@v3
       with:
         version: '6.5.3'
         host: 'windows'
         target: 'desktop'
-        arch: 'win64_msvc2019_64'
+        arch: 'win64_msvc2022_64' # 适配最新VS
         modules: 'qtcore qtgui qtwidgets'
+        cache: true
 
-    - name: 安装 OpenCV
+    # 修复2：改用预编译的OpenCV，避免解压出错
+    - name: 安装 OpenCV 4.8.0
       run: |
-        Invoke-WebRequest -Uri "https://github.com/opencv/opencv/releases/download/4.8.0/opencv-4.8.0-windows.exe" -OutFile "opencv.exe"
-        Start-Process -FilePath ".\opencv.exe" -ArgumentList "-o$env:GITHUB_WORKSPACE -y" -Wait
-        echo "OPENCV_DIR=$env:GITHUB_WORKSPACE\opencv\build" >> $env:GITHUB_ENV
+        # 直接下载解压好的OpenCV，跳过安装包
+        Invoke-WebRequest -Uri "https://github.com/huihut/OpenCV-MinGW-Build/releases/download/4.8.0/opencv-4.8.0-vc17_vc16.zip" -OutFile "opencv.zip"
+        Expand-Archive -Path opencv.zip -DestinationPath . -Force
+        echo "OPENCV_DIR=$env:GITHUB_WORKSPACE\opencv" >> $env:GITHUB_ENV
 
-    - name: 配置 MSVC 环境
+    # 修复3：指定VS2022环境
+    - name: 配置 MSVC 2022 环境
       uses: ilammy/msvc-dev-cmd@v1
       with:
+        toolset: 14.3
         arch: x64
 
-    - name: 创建项目文件
+    # 修复4：手动创建完整项目文件，避免路径问题
+    - name: 创建完整的.pro文件
       run: |
-        echo "QT += core gui widgets" > ZhangXuanCalculator.pro
-        echo "CONFIG += c++17" >> ZhangXuanCalculator.pro
-        echo "SOURCES += Card.cpp ZhangXuanCalculator.cpp WindowCapture.cpp CaptureThread.cpp MainWindow.cpp main.cpp" >> ZhangXuanCalculator.pro
-        echo "HEADERS += Card.h ZhangXuanCalculator.h WindowCapture.h CaptureThread.h MainWindow.h" >> ZhangXuanCalculator.pro
-        echo "FORMS += MainWindow.ui" >> ZhangXuanCalculator.pro
-        echo "INCLUDEPATH += $env:OPENCV_DIR/include $env:OPENCV_DIR/include/opencv2" >> ZhangXuanCalculator.pro
-        echo "LIBS += -L$env:OPENCV_DIR/x64/vc16/lib -lopencv_world480" >> ZhangXuanCalculator.pro
-        echo "LIBS += -luser32 -lgdi32" >> ZhangXuanCalculator.pro
+        @echo off
+        echo QT += core gui widgets > ZhangXuanCalculator.pro
+        echo CONFIG += c++17 release >> ZhangXuanCalculator.pro
+        echo DESTDIR = ./release >> ZhangXuanCalculator.pro
+        echo OBJECTS_DIR = ./obj >> ZhangXuanCalculator.pro
+        echo MOC_DIR = ./moc >> ZhangXuanCalculator.pro
+        echo RCC_DIR = ./rcc >> ZhangXuanCalculator.pro
+        echo SOURCES += ^
+        echo     Card.cpp ^
+        echo     ZhangXuanCalculator.cpp ^
+        echo     WindowCapture.cpp ^
+        echo     CaptureThread.cpp ^
+        echo     MainWindow.cpp ^
+        echo     main.cpp >> ZhangXuanCalculator.pro
+        echo HEADERS += ^
+        echo     Card.h ^
+        echo     ZhangXuanCalculator.h ^
+        echo     WindowCapture.h ^
+        echo     CaptureThread.h ^
+        echo     MainWindow.h >> ZhangXuanCalculator.pro
+        echo FORMS += MainWindow.ui >> ZhangXuanCalculator.pro
+        echo # OpenCV配置 >> ZhangXuanCalculator.pro
+        echo INCLUDEPATH += $$(OPENCV_DIR)/include $$(OPENCV_DIR)/include/opencv2 >> ZhangXuanCalculator.pro
+        echo LIBS += -L$$(OPENCV_DIR)/x64/vc16/lib -lopencv_world480 >> ZhangXuanCalculator.pro
+        echo # Windows API依赖 >> ZhangXuanCalculator.pro
+        echo LIBS += -luser32 -lgdi32 -lwinmm >> ZhangXuanCalculator.pro
+        # 打印确认文件内容
+        type ZhangXuanCalculator.pro
+
+    # 修复5：分步编译，先qmake再nmake
+    - name: 生成编译文件
+      run: |
+        qmake ZhangXuanCalculator.pro -spec win32-msvc "CONFIG+=release"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: 编译项目
       run: |
-        qmake ZhangXuanCalculator.pro
+        nmake clean
         nmake
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    - name: 打包成品
+    # 修复6：完善打包逻辑，确保所有依赖都复制
+    - name: 打包成品（包含所有依赖）
       run: |
-        mkdir release
-        copy release\ZhangXuanCalculator.exe release\
-        windeployqt release\ZhangXuanCalculator.exe
-        copy $env:OPENCV_DIR\x64\vc16\bin\opencv_world480.dll release\
-        Compress-Archive -Path release\* -DestinationPath ZhangXuanCalculator_Win64.zip
+        # 创建输出目录
+        mkdir -Force ./final_release
+        # 复制主程序
+        copy ./release/ZhangXuanCalculator.exe ./final_release/
+        # 复制Qt依赖
+        windeployqt --release --no-translations --no-opengl-sw ./final_release/ZhangXuanCalculator.exe
+        # 复制OpenCV依赖
+        copy "$env:OPENCV_DIR\x64\vc16\bin\opencv_world480.dll" ./final_release/
+        # 复制VC运行库（避免缺少MSVCP140.dll）
+        copy "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC\14.38.33130\x64\Microsoft.VC143.CRT\*.dll" ./final_release/
+        # 压缩打包
+        Compress-Archive -Path ./final_release/* -DestinationPath ZhangXuanCalculator_Win64_Release.zip -Force
 
-    - name: 上传成品
+    # 上传成品
+    - name: 上传编译好的成品
       uses: actions/upload-artifact@v4
       with:
         name: ZhangXuanCalculator_Win64
-        path: ZhangXuanCalculator_Win64.zip
+        path: ZhangXuanCalculator_Win64_Release.zip
+        retention-days: 90 # 保留90天
